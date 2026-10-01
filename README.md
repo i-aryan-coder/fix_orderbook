@@ -368,11 +368,38 @@ Verified on Windows with Docker Desktop Linux containers:
 
 ---
 
-## 7. Phase 7 CI/CD Foundation
+## 7. Live Demo
 
-Phase 7 adds repository automation and deployment scaffolding without changing trading behavior.
+Frontend:
+https://tradepro-ggba.onrender.com
 
-### GitHub Actions
+Backend:
+https://tradex-i7n2.onrender.com
+
+The public deployment runs the React trading terminal as a Render Static Site and the C++ matching-engine API as a Render Docker Web Service. Browser traffic uses HTTPS for REST and WSS for live orderbook/trade/order-update events.
+
+Render free-tier services may sleep after inactivity. If the demo is cold, the first request can take a short time while the backend wakes; the dashboard reconnects once the service is available.
+
+## 8. Deployment
+
+Frontend: Render Static Site (`frontend/`, `npm ci && npm run build`, publish `dist`).
+
+Backend: Render Web Service using the existing backend `Dockerfile`.
+
+Transport: HTTPS for REST and WSS for WebSocket live events.
+
+Production environment:
+
+```text
+API_HOST=0.0.0.0
+CORS_ALLOWED_ORIGIN=https://tradepro-ggba.onrender.com
+VITE_API_BASE_URL=https://tradex-i7n2.onrender.com
+VITE_WS_URL=wss://tradex-i7n2.onrender.com/ws
+```
+
+Render supplies `PORT` to the backend at runtime; the backend reads `PORT` before falling back to local `API_PORT`.
+
+## 9. CI/CD
 
 Workflows are defined under `.github/workflows/`:
 
@@ -413,15 +440,11 @@ CORS_ALLOWED_ORIGIN=https://your-domain.example \
 docker compose -f docker-compose.prod.yml up -d
 ```
 
-For Render deployment, configure the backend as a Docker Web Service with health check path `/health`. Set `API_HOST=0.0.0.0`; Render supplies `PORT`, and the backend uses it before `API_PORT`. After the frontend URL is known, set `CORS_ALLOWED_ORIGIN` to that exact HTTPS origin.
-
-Configure the frontend as a Render Static Site rooted at `frontend/` with build command `npm ci && npm run build` and publish directory `dist`. Set `VITE_API_BASE_URL` to the deployed backend HTTPS URL and `VITE_WS_URL` to `wss://<backend-host>/ws`.
-
-Public deployment, domain/HTTPS wiring, and final public smoke testing are intentionally left for the deployment step after the target Render services are created.
+The Render deployment is verified publicly at the live demo URLs above. Keep production CORS set to the exact frontend origin rather than `*`.
 
 ---
 
-## 8. Supported Order Types & Matching Semantics
+## 10. Supported Order Types & Matching Semantics
 
 ### Limit Orders
 - Specifies limit price and quantity.
@@ -439,7 +462,7 @@ Public deployment, domain/HTTPS wiring, and final public smoke testing are inten
 
 ---
 
-## 9. Matching Priority & Execution Pricing
+## 11. Matching Priority & Execution Pricing
 
 ### Price-Time Priority (FIFO)
 1. **Price Priority**:
@@ -455,7 +478,7 @@ Public deployment, domain/HTTPS wiring, and final public smoke testing are inten
 
 ---
 
-## 10. Order Modification Policy
+## 12. Order Modification Policy
 
 Order modification (`Matchorder` / `OrderModify`) adheres to exchange-grade queue priority rules:
 
@@ -470,7 +493,7 @@ Order modification (`Matchorder` / `OrderModify`) adheres to exchange-grade queu
 
 ---
 
-## 11. Core Data Structures & Realistic Complexity
+## 13. Core Data Structures & Realistic Complexity
 
 | Component | Container | Role & Rationale |
 | :--- | :--- | :--- |
@@ -491,7 +514,7 @@ Order modification (`Matchorder` / `OrderModify`) adheres to exchange-grade queu
 
 ---
 
-## 12. Project Layout
+## 14. Project Layout
 
 ```text
 fix_orderbook/
@@ -548,7 +571,7 @@ fix_orderbook/
 
 ---
 
-## 13. Building & Testing
+## 15. Building & Testing
 
 ### Prerequisites
 - GCC / MinGW-w64 with C++17 support (`g++`)
@@ -609,7 +632,7 @@ Live Phase 5 demo flow:
 
 ---
 
-## 14. Development Roadmap
+## 16. Development Roadmap
 
 - [x] **Phase 1: Core Matching Engine Corrections & Refactoring**
   - Fix Market Order semantics (aggressive sweep, never rests).

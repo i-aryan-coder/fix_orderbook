@@ -20,7 +20,7 @@ WORKDIR /app
 COPY --from=build /app/api_server ./api_server
 
 ENV API_HOST=0.0.0.0 \
-    CORS_ALLOWED_ORIGIN=https://tradepro-ggba.onrender.com/
+    CORS_ALLOWED_ORIGIN=https://tradepro-ggba.onrender.com
 
 EXPOSE 8080
 USER appuser
