@@ -1,0 +1,15 @@
+.git
+.vscode
+*.exe
+*.o
+*.obj
+*.dll
+*.so
+*.dylib
+build
+dist
+log
+store
+node_modules
+frontend/node_modules
+frontend/dist

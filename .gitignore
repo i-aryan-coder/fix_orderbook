@@ -1,0 +1,38 @@
+# Native build outputs
+*.exe
+*.o
+*.obj
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+*.pdb
+*.ilk
+run_*_tests
+run_benchmarks
+api_server
+engine
+
+# Runtime/generated state
+store/
+log/
+build/
+coverage/
+*.log
+core
+core.*
+
+# Frontend dependencies/build outputs
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Local environment and editor files
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

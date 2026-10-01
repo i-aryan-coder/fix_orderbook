@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend-regression:
+    name: Backend regression
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install C++ toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends g++ make
+
+      - name: Build API server
+        run: make api-server API_SERVER_BIN=api_server CXXFLAGS='-std=c++17 -Wall -Wextra -Wpedantic -O2 -Iinclude'
+
+      - name: Run complete backend regression suite
+        run: make test CXXFLAGS='-std=c++17 -Wall -Wextra -Wpedantic -O2 -Iinclude'
+
+  frontend:
+    name: Frontend build and lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Lint frontend
+        working-directory: frontend
+        run: npm run lint
+
+  tsan:
+    name: ThreadSanitizer concurrency
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install C++ toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends g++ make
+
+      - name: Run concurrency tests under ThreadSanitizer
+        run: make test-concurrency-tsan
+
+  docker:
+    name: Docker build and smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate Compose configuration
+        run: docker compose config
+
+      - name: Build Compose images
+        run: docker compose build
+
+      - name: Start Compose stack
+        run: docker compose up -d
+
+      - name: Wait for frontend proxy
+        run: |
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:5173/health; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker compose logs
+          exit 1
+
+      - name: Smoke test REST through production proxy
+        run: |
+          set -euo pipefail
+          curl -fsS http://127.0.0.1:5173/ready
+          curl -fsS -X POST http://127.0.0.1:5173/orders \
+            -H 'Content-Type: application/json' \
+            -d '{"side":"BUY","orderType":"LIMIT","price":100,"quantity":10,"clientOrderId":"CI-BUY"}'
+          curl -fsS -X POST http://127.0.0.1:5173/orders \
+            -H 'Content-Type: application/json' \
+            -d '{"side":"SELL","orderType":"LIMIT","price":100,"quantity":4,"clientOrderId":"CI-SELL"}'
+          curl -fsS http://127.0.0.1:5173/orders | tee /tmp/orders.json
+          curl -fsS http://127.0.0.1:5173/orderbook | tee /tmp/orderbook.json
+          curl -fsS http://127.0.0.1:5173/trades | tee /tmp/trades.json
+          grep -q '"remainingQuantity":6' /tmp/orders.json
+          grep -q '"status":"PARTIALLY_FILLED"' /tmp/orders.json
+          grep -q '"status":"FILLED"' /tmp/orders.json
+          grep -q '"price":100' /tmp/orderbook.json
+          grep -q '"quantity":6' /tmp/orderbook.json
+          grep -q '"quantity":4' /tmp/trades.json
+
+      - name: Show Compose logs
+        if: always()
+        run: docker compose logs --tail=100
+
+      - name: Stop Compose stack
+        if: always()
+        run: docker compose down

@@ -1,0 +1,23 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      API_HOST: 0.0.0.0
+      API_PORT: 18080
+      CORS_ALLOWED_ORIGIN: http://127.0.0.1:5173
+    expose:
+      - "18080"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ""
+        VITE_WS_URL: ""
+    depends_on:
+      - backend
+    ports:
+      - "5173:80"

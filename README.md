@@ -1,86 +1,659 @@
-# Fix_orderbook
+# C++ FIX Order Matching Engine (Phase 5: React Trading Dashboard)
 
-This repository contains a FIX-based trading application that simulates order matching using an order book. The project is implemented in C++ and uses QuickFIX for FIX protocol communication.
+A deterministic, high-performance, in-memory continuous double auction order matching engine written in modern C++17, designed with clean low-level design (LLD) principles for financial exchanges and electronic trading systems.
 
-## Features
-- **Order Matching Engine**: Supports limit orders, market orders, and fill-and-kill orders.
-- **FIX Protocol Support**: Implements FIX 4.4 for communication.
-- **Aggregated Order Book**: Displays bids and asks after trades are executed.
-- **Trade Execution Reports**: Sends execution reports as acknowledgments.
+---
 
-## File Structure
-- `fixapp.h`: Defines the FIX application logic.
-- `main.cpp`: Initializes the FIX engine and handles incoming orders.
-- `orderbook.h`: Contains classes for managing orders and trades.
-- `orderbook.cpp`: Implements the order matching algorithm.
-- `trading_confi.cfg`: Configuration file for FIX engine settings.
+## 1. System Concurrency Architecture
 
-## Configuration File (`trading_confi.cfg`)
-Below is an example configuration file used by the application:
-Below is the structure for your GitHub repository, including all files and a detailed README.md file to ensure proper readability and organization.
-Repository Structure
-Files Included:
+The system enforces **Single Ownership** of the canonical `Orderbook`. No external thread (FIX, REST, WebSocket, or API) is permitted to directly mutate or lock the internal order book structures. Matching is strictly serialized on a dedicated worker thread, decoupling high-throughput ingestion from core execution.
 
-    fixapp.h: Contains the implementation of the FIX application logic.
+```text
+                 Order Producers
+          ┌──────────┼──────────┐
+          │          │          │
+         FIX        REST      Future APIs
+          │          │          │
+          └──────────┼──────────┘
+                     │
+                     ▼
+              ┌───────────────┐
+              │  Order/Event  │
+              │  Queue (MPSC) │  (Thread-Safe, Condition Variable, Non-Busy-Waiting)
+              └───────┬───────┘
+                      │
+                      ▼
+            ┌────────────────────┐
+            │ Matching Engine    │
+            │ Dedicated Worker   │
+            │ Thread             │  (Single Sequential Consumer)
+            └─────────┬──────────┘
+                      │
+                      ▼
+                ┌───────────┐
+                │ Orderbook │
+                │            │
+                │ Single     │  (Never concurrently mutated by multiple threads)
+                │ Owner      │
+                └─────┬─────┘
+                      │
+             ┌────────┴────────┐
+             │                 │
+             ▼                 ▼
+       Trade Events       Book Snapshots
+             │                 │
+             ▼                 ▼
+       Future FIX          REST/WebSocket
+       Reports             Consumers (Non-blocking, immutable copy)
+```
 
-    main.cpp: Entry point for the application, initializing the FIX engine and handling orders.
+---
 
-    orderbook.h: Header file defining the order book and related classes.
+## 2. Concurrency Principles & Ingestion Design
 
-    orderbook.cpp: Implementation of the order book logic.
+### Single Ownership & Determinism
+- The canonical `Orderbook` is private to `MatchingEngine`.
+- Only the dedicated `workerLoop` thread executes matching routines (`addorder`, `cancelorder`, `Matchorder`).
+- Given the same sequence of events entering the queue, the execution order, trade prices, and book state are **100% deterministic and reproducible**.
 
-    trading_confi.cfg: Configuration file for FIX engine settings.
+### Thread-Safe MPSC Queue (`ThreadSafeQueue<T>`)
+- Multi-producer safe (`push(item)`) with atomic sequence number assignment.
+- Single-consumer blocking wait (`wait_and_pop(item)`) using `std::condition_variable`.
+- **Zero Busy-Waiting**: The worker thread sleeps when the queue is empty and wakes up immediately upon event submission.
+- **Graceful Shutdown & Draining**: Supports stopping new ingestions while allowing in-flight queued events to be drained and processed completely.
 
-README.md
+### Non-Blocking Read-Only Snapshots (`OrderbookSnapshot`)
+- External consumers (REST APIs, WebSockets, dashboards) read **immutable snapshots**.
+- Snapshots include sequence numbers, timestamps, and aggregated price levels.
+- Published via a minimal pointer swap (`std::shared_ptr<const OrderbookSnapshot>`).
+- **Slow Consumer Isolation**: A slow consumer reading or serializing a snapshot over a slow network connection never holds a lock on the matching thread or canonical book.
 
-text
-# FIX Trading Application
+### Trade Event Pipeline
+- Executed trades are emitted immediately as `Trade` objects and broadcast to registered `TradeListener` callbacks.
+- `FixApp` subscribes as a protocol adapter and translates actual `Trade` results into FIX 4.4 `ExecutionReport` state.
+- The matching engine remains FIX-agnostic and never includes QuickFIX message types.
 
-This repository contains a FIX-based trading application that simulates order matching using an order book. The project is implemented in C++ and uses QuickFIX for FIX protocol communication.
+---
 
-## Features
-- **Order Matching Engine**: Supports limit orders, market orders, and fill-and-kill orders.
-- **FIX Protocol Support**: Implements FIX 4.4 for communication.
-- **Aggregated Order Book**: Displays bids and asks after trades are executed.
-- **Trade Execution Reports**: Sends execution reports as acknowledgments.
+## 3. Phase 3 FIX 4.4 Protocol Adapter
 
-## File Structure
-- `fixapp.h`: Defines the FIX application logic.
-- `main.cpp`: Initializes the FIX engine and handles incoming orders.
-- `orderbook.h`: Contains classes for managing orders and trades.
-- `orderbook.cpp`: Implements the order matching algorithm.
-- `trading_confi.cfg`: Configuration file for FIX engine settings.
+Phase 3 unifies the FIX-facing layer on FIX 4.4 while preserving the Phase 1/2 matching architecture.
 
-## Configuration File (`trading_confi.cfg`)
-Below is an example configuration file used by the application:
+```text
+FIX 4.4 Client
+      |
+      v
+FixApp / Protocol Adapter
+      |
+      v
+Internal OrderEvent
+      |
+      v
+MPSC Queue
+      |
+      v
+Single Matching Worker
+      |
+      v
+Orderbook
+      |
+      v
+Trade Events / Order Results
+      |
+      v
+FIX 4.4 ExecutionReport Adapter
+```
 
-[DEFAULT]
-ConnectionType=initiator
-HeartBtInt=30
-FileStorePath=store
-StartTime=00:00:00
-EndTime=00:00:00
-UseDataDictionary=Y
-SocketConnectHost=app.fixsim.com # Replace with the actual simulator host
+### Supported FIX 4.4 Messages
 
-[SESSION]
-BeginString=FIX.4.4
-SenderCompID=pap865601@gmail_com # Provided by FIX Sim
-TargetCompID=FIXSIMDEMO # Target ID from FIX Sim
-SocketConnectPort=15000 # Use correct port
-DataDictionary=FIX44.xml
+| FIX message | Internal action |
+| :--- | :--- |
+| `FIX44::NewOrderSingle` | Validates fields, maps `ClOrdID` to an internal order ID, and submits a new-order event. |
+| `FIX44::OrderCancelRequest` | Resolves `OrigClOrdID` to the internal order ID and submits a cancel event. |
+| `FIX44::OrderCancelReplaceRequest` | Resolves `OrigClOrdID`, applies existing modify semantics, and submits a modify event. |
+| `FIX44::ExecutionReport` | Produced by `FixApp` from accepted, fill, cancel, replace, and reject outcomes. |
 
-## Using FixSim for simulation
-This project uses fixsim.com for fix simulation 
+### Order and ID Mapping
 
+- FIX `ClOrdID` is treated as an arbitrary string and is never parsed as an integer.
+- `FixApp` maintains `ClOrdID -> internal OrderID` mappings for active orders.
+- Internal order IDs are generated by the adapter and used only by the matching engine.
+- `ExecID` is generated independently and uniquely for every execution report.
 
-## Dependencies
-- **QuickFIX**: A library for implementing the FIX protocol in C++.
-- **C++17 or higher**: Required for modern C++ features used in this project.
+### ExecutionReport Mapping
 
-## License
-This project is licensed under the MIT License.
+| Report field | Source |
+| :--- | :--- |
+| `ClOrdID` / `OrigClOrdID` | FIX request mapping state |
+| `OrderID` | Internal generated order ID |
+| `ExecID` | Adapter-generated unique execution ID |
+| `ExecType` / `OrdStatus` | Accepted, partial fill, fill, canceled, replaced, or rejected lifecycle state |
+| `LastQty` / `LastPx` | Actual matching-engine `Trade` quantity and execution price |
+| `CumQty` / `LeavesQty` | Adapter-maintained cumulative order state |
+| `AvgPx` | Cumulative notional divided by cumulative quantity |
 
-## Contributing
-There might be some bugs in the implementation. Feel free to fork this repository, make changes, and submit pull requests!
+### Order Flows
 
+- **NewOrderSingle**: Validates `ClOrdID`, `Side`, `OrderQty`, `OrdType`, `Price`, and TimeInForce-derived FAK behavior, emits a new-order acknowledgment, then queues the order.
+- **Cancel**: Resolves `OrigClOrdID`, queues cancellation, and emits canceled or rejected reports based on matching-engine result.
+- **Cancel/Replace**: Preserves Phase 1 semantics: same-price quantity reduction keeps priority, quantity increase loses priority, and price changes lose priority.
+- **Fills**: Both buyer and seller receive execution reports. Execution price always comes from the actual `Trade` object.
+
+---
+
+## 4. Phase 4 REST/WebSocket API Adapter
+
+Phase 4 adds backend API adapter components without changing the matching core. REST-style writes are converted into the same internal event flow as FIX:
+
+```text
+FIX 4.4 ─────┐
+             ├──> OrderEvent -> MPSC Queue -> MatchingEngine Worker -> Orderbook
+REST API ────┘
+
+MatchingEngine Worker
+      │
+      ├── immutable OrderbookSnapshot -> outbound broadcast queue -> WebSocket broadcaster
+      └── Trade/Event listeners ------> outbound broadcast queue -> WebSocket broadcaster
+```
+
+### REST-style API operations
+
+| Operation | Adapter method | Internal path |
+| :--- | :--- | :--- |
+| Submit order | `ApiServer::submitOrder` | API validation -> `OrderEvent::New` -> MPSC queue -> worker result |
+| Cancel order | `ApiServer::cancelOrder` | API validation -> `OrderEvent::Cancel` -> MPSC queue -> worker result |
+| Modify order | `ApiServer::modifyOrder` | API validation -> `OrderEvent::Modify` -> MPSC queue -> worker result |
+| Get order status | `ApiServer::getOrderStatus` | API-layer status store populated by engine events/trades |
+| Get order book | `ApiServer::getOrderbook` | immutable `OrderbookSnapshot` read |
+| Get recent trades | `ApiServer::getRecentTrades` | bounded trade store populated by `TradeListener` |
+
+REST handlers may use synchronous `MatchingEngine` submission APIs for immediate responses, but matching logic still executes only on the matching worker thread.
+
+### HTTP REST endpoints
+
+A dependency-free socket-based `HttpApiServer` exposes the API adapter over JSON:
+
+| Method | Path | Purpose |
+| :--- | :--- | :--- |
+| `GET` | `/health` | Report API/engine liveness. |
+| `GET` | `/ready` | Report process/API readiness for production probes. |
+| `POST` | `/orders` | Submit `LIMIT`, `MARKET`, or `FAK` orders. |
+| `DELETE` | `/orders` | Cancel by `orderId` or `clientOrderId`. |
+| `PATCH` / `PUT` | `/orders` | Modify by `orderId` or `clientOrderId`. |
+| `GET` | `/orders` | Return all API-tracked order statuses. |
+| `GET` | `/orders/{id-or-clOrdID}` | Return one order status. |
+| `GET` | `/orderbook` | Return the latest immutable book snapshot. |
+| `GET` | `/trades` | Return bounded recent trades. |
+
+Example order submission:
+
+```bash
+curl -X POST http://127.0.0.1:8080/orders \
+  -H "Content-Type: application/json" \
+  -d '{"clientOrderId":"B1","symbol":"AAPL","side":"BUY","orderType":"LIMIT","price":100,"quantity":5}'
+```
+
+### WebSocket broadcasting
+
+- `GET /ws` performs a WebSocket upgrade handshake.
+- `ApiServer` subscribes through existing `TradeListener` and `EventListener` mechanisms.
+- Listener callbacks only update API stores and enqueue outbound messages.
+- `OutboundBroadcastQueue` is bounded and non-blocking; when full, it drops the oldest outbound message instead of blocking matching.
+- `WebSocketBroadcaster` drains outbound messages on its own thread and sends frames to connected WebSocket clients, keeping network/socket work outside the matching worker.
+- This phase intentionally avoids Docker, CI/CD, auth, and deployment work.
+
+---
+
+## 5. Phase 5 React Trading Dashboard
+
+Phase 5 adds a browser trading terminal in `frontend/` while keeping the C++ backend as the single source of truth. React sends commands only through REST and consumes live market/order updates only through WebSocket.
+
+```text
+React Dashboard
+  ├── REST commands: submit, cancel, modify
+  └── WebSocket events: orderbook, trades, order updates
+                    │
+                    ▼
+              C++ API Server
+                    │
+                    ▼
+           OrderEvent -> MPSC Queue -> MatchingEngine Worker
+```
+
+Dashboard panels:
+
+| Panel | Source of truth |
+| :--- | :--- |
+| Order entry | Sends REST commands to `/orders`. |
+| Order book | Renders immutable `/orderbook` snapshots and `orderbook` WebSocket events. |
+| Trade tape | Renders `/trades` and `trade` WebSocket events. |
+| Orders table | Renders backend-confirmed `/orders` status. |
+| Execution panel | Shows selected backend-confirmed order status plus actual trade records. |
+
+Frontend constraints:
+- React does not implement matching, validation, FIFO priority, or order state transitions.
+- WebSocket `sequenceNumber` is preserved for orderbook/order-update events.
+- The WebSocket hook detects sequence gaps/out-of-order messages where practical and refreshes state using REST.
+- WebSocket reconnection is centralized in the hook, not individual UI components.
+
+Run the dashboard:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+The default frontend expects the backend at `http://127.0.0.1:18080` and WebSocket at `ws://127.0.0.1:18080/ws`. Override with `VITE_API_BASE_URL` and `VITE_WS_URL` if needed. For reverse-proxy deployments, build with empty `VITE_API_BASE_URL` and `VITE_WS_URL` so REST and WebSocket traffic use the browser origin.
+
+---
+
+## 6. Phase 6 Productionization, Benchmarking & TSan
+
+Phase 6 moves the project from local demo to reproducible production-style runtime without adding trading functionality or changing matching semantics.
+
+### Runtime configuration
+
+The C++ API server reads runtime configuration from environment variables:
+
+| Variable | Default | Purpose |
+| :--- | :--- | :--- |
+| `API_HOST` | `0.0.0.0` | Bind address for the HTTP/WebSocket server. |
+| `PORT` | unset | Preferred runtime bind port for Render-style platforms. |
+| `API_PORT` | `8080` | Local/container bind port fallback when `PORT` is unset. |
+| `CORS_ALLOWED_ORIGIN` | `*` | Allowed browser origin for REST responses. |
+
+Example:
+
+```bash
+API_HOST=0.0.0.0 API_PORT=18080 CORS_ALLOWED_ORIGIN=http://127.0.0.1:5173 ./api_server
+```
+
+On Windows PowerShell:
+
+```powershell
+$env:API_HOST='0.0.0.0'
+$env:API_PORT='18080'
+$env:CORS_ALLOWED_ORIGIN='http://127.0.0.1:5173'
+.\api_server.exe
+```
+
+The API server no longer depends on stdin staying open. It runs until `SIGINT` or `SIGTERM`, then stops the HTTP/WebSocket server and drains/stops the matching engine. If both `PORT` and `API_PORT` are set, `PORT` wins so Render can provide the runtime port without code changes.
+
+### Dockerized local production runtime
+
+Phase 6 adds container definitions for a production-style local run:
+
+```bash
+docker compose up --build
+```
+
+Container layout:
+
+```text
+Browser
+  │
+  │ HTTP / WebSocket
+  ▼
+Frontend Nginx container
+  ├── static React assets
+  └── reverse proxy to backend container
+          │
+          ▼
+      C++ API Server
+          │
+          ▼
+   MPSC Queue -> MatchingEngine Worker -> Orderbook
+```
+
+The frontend container serves the Vite production build through Nginx and proxies `/health`, `/ready`, `/orders`, `/orderbook`, `/trades`, and `/ws` to the backend container.
+
+### Matching engine benchmarks
+
+The benchmark target measures the existing `MatchingEngine` event queue and worker thread path for representative workloads:
+
+```bash
+make benchmark
+```
+
+Override the workload size with `BENCH_OPS`:
+
+```bash
+BENCH_OPS=50000 make benchmark
+```
+
+Benchmarked scenarios:
+
+- Non-crossing limit order insertion.
+- Resting order cancellation.
+- Resting order modification.
+- Crossing limit-order matching.
+- Market order execution against resting liquidity.
+- Concurrent producer ingestion through the MPSC queue.
+
+Output includes operations, elapsed time, throughput, average latency, and p50/p95/p99 latency where per-operation latency is measured.
+
+### Linux ThreadSanitizer validation
+
+ThreadSanitizer validation is wired for Linux builds through the concurrency regression suite:
+
+```bash
+make test-concurrency-tsan
+```
+
+A Docker helper is also provided for Linux TSan execution:
+
+```bash
+docker build -f Dockerfile.tsan -t trading-engine-tsan .
+docker run --rm trading-engine-tsan
+```
+
+On Docker Desktop/WSL2, ThreadSanitizer may require running the same image with ASLR disabled for the process:
+
+```bash
+docker run --rm --privileged --entrypoint bash trading-engine-tsan -lc 'setarch $(uname -m) -R make test-concurrency-tsan'
+```
+
+### Phase 6 verification status
+
+Verified on Windows with Docker Desktop Linux containers:
+
+- Docker Compose configuration, image build, container startup, and graceful stop passed.
+- Production proxy path through Nginx passed for `/health`, `/ready`, REST orders, order status, orderbook, trades, and WebSocket updates.
+- WebSocket proxy delivered `trade`, `orderUpdate`, and `orderbook` events with monotonic sequence numbers.
+- ThreadSanitizer concurrency suite passed with 15/15 tests and no reported data races using the Docker Desktop/WSL2 command above.
+- Backend regression passed: 35/35 orderbook, 15/15 concurrency, 21/21 FIX, 29/29 API, 100/100 total.
+- Frontend production build passed; lint passed with the known existing `App.tsx` warning.
+- Benchmark suite executed with `BENCH_OPS=10000`.
+
+---
+
+## 7. Phase 7 CI/CD Foundation
+
+Phase 7 adds repository automation and deployment scaffolding without changing trading behavior.
+
+### GitHub Actions
+
+Workflows are defined under `.github/workflows/`:
+
+- `ci.yml` runs backend regression tests, frontend build/lint, native Linux ThreadSanitizer concurrency tests, and Docker Compose build/smoke validation.
+- `docker-publish.yml` publishes backend and frontend images to GitHub Container Registry on `main`, version tags, or manual dispatch.
+
+The CI regression gate preserves the existing expected totals:
+
+```text
+35/35 Orderbook
+15/15 Concurrency
+21/21 FIX
+29/29 API
+100/100 Total
+```
+
+The Docker CI job validates the production proxy path by building the Compose stack, starting it, and testing `/health`, `/ready`, REST order submission, orderbook, orders, and trades through the frontend Nginx proxy.
+
+### Container registry publishing
+
+Published image names follow this pattern:
+
+```text
+ghcr.io/<owner>/<repo>-backend
+ghcr.io/<owner>/<repo>-frontend
+```
+
+The publish workflow uses GitHub Actions package permissions and does not require committing registry credentials.
+
+### Production Compose template
+
+`docker-compose.prod.yml` is provided for VM deployment using published images:
+
+```bash
+BACKEND_IMAGE=ghcr.io/<owner>/<repo>-backend:main \
+FRONTEND_IMAGE=ghcr.io/<owner>/<repo>-frontend:main \
+CORS_ALLOWED_ORIGIN=https://your-domain.example \
+docker compose -f docker-compose.prod.yml up -d
+```
+
+For Render deployment, configure the backend as a Docker Web Service with health check path `/health`. Set `API_HOST=0.0.0.0`; Render supplies `PORT`, and the backend uses it before `API_PORT`. After the frontend URL is known, set `CORS_ALLOWED_ORIGIN` to that exact HTTPS origin.
+
+Configure the frontend as a Render Static Site rooted at `frontend/` with build command `npm ci && npm run build` and publish directory `dist`. Set `VITE_API_BASE_URL` to the deployed backend HTTPS URL and `VITE_WS_URL` to `wss://<backend-host>/ws`.
+
+Public deployment, domain/HTTPS wiring, and final public smoke testing are intentionally left for the deployment step after the target Render services are created.
+
+---
+
+## 8. Supported Order Types & Matching Semantics
+
+### Limit Orders
+- Specifies limit price and quantity.
+- Matches crossing opposite liquidity ($\text{Buy} \ge \text{Best Ask}$ or $\text{Sell} \le \text{Best Bid}$).
+- Unfilled remainder enters the resting book at its limit price with FIFO time priority.
+
+### Market Orders
+- Demands immediate execution against best available prices.
+- **Never rests in the order book**: Sweeps price levels until filled or opposite book is exhausted. Unfilled portion is cancelled immediately.
+
+### Fill-and-Kill (FAK / IOC)
+- Matches immediately against crossing orders up to limit price.
+- Unfilled remainder is **cancelled immediately** and never enters the resting book.
+- Distinct from FOK (Fill-or-Kill), which requires complete execution or immediate cancellation (all-or-none).
+
+---
+
+## 9. Matching Priority & Execution Pricing
+
+### Price-Time Priority (FIFO)
+1. **Price Priority**:
+   - Higher bids have priority over lower bids (bids sorted descending).
+   - Lower asks have priority over higher asks (asks sorted ascending).
+2. **Time Priority**:
+   - At each price level, orders are matched strictly in arrival order (`std::list<orderptr>`).
+
+### Execution Price Policy
+- Under continuous double auction matching, the trade executes at the **resting order's limit price**:
+  $$\text{Execution Price} = \text{Resting Order Price}$$
+- Every trade has exactly **one single execution price** shared between buyer and seller.
+
+---
+
+## 10. Order Modification Policy
+
+Order modification (`Matchorder` / `OrderModify`) adheres to exchange-grade queue priority rules:
+
+1. **Price Change**:
+   - The original order is cancelled and re-submitted at the new price.
+   - The order **loses time priority** (placed at the tail of the new price level).
+2. **Quantity Decrease (Same Price)**:
+   - Modified **in-place** in the FIFO list.
+   - The order **preserves its exact time priority**.
+3. **Quantity Increase (Same Price)**:
+   - To prevent size gaming, increasing quantity causes the order to **lose priority** (re-queued at tail).
+
+---
+
+## 11. Core Data Structures & Realistic Complexity
+
+| Component | Container | Role & Rationale |
+| :--- | :--- | :--- |
+| **Bids Book** | `std::map<int, std::list<orderptr>, std::greater<int>>` | Red-Black Tree maintaining bids sorted descending. Top-of-book (best bid) is `bids_.begin()`. |
+| **Asks Book** | `std::map<int, std::list<orderptr>, std::less<int>>` | Red-Black Tree maintaining asks sorted ascending. Top-of-book (best ask) is `asks_.begin()`. |
+| **Price Level Queue** | `std::list<orderptr>` | Doubly-linked list providing strict $O(1)$ FIFO append, front pop, and in-place erasure given an iterator. |
+| **Order Lookup Index** | `std::unordered_map<int, orderentry>` | Hash table mapping `orderId` to `{orderptr, list_iterator}` for fast order location. |
+| **Event Queue** | `ThreadSafeQueue<OrderEvent>` | Mutex + condition variable MPSC queue for thread-safe event ingestion without busy-waiting. |
+| **Snapshot Registry** | `std::shared_ptr<const OrderbookSnapshot>` | Pointer-swapped immutable snapshot preventing slow readers from blocking matching. |
+
+### Realistic Algorithmic Complexity
+
+- **Order Ingestion (Push to Queue)**: $O(1)$ locked queue append.
+- **Order Lookup**: $O(1)$ average hash lookup.
+- **Cancel Order**: $O(1)$ lookup + $O(1)$ node erase + $O(\log P)$ price-level map erase if level emptied.
+- **Modify Order (Reduced Quantity)**: $O(1)$ lookup + $O(1)$ in-place update.
+- **Matching Operation**: $O(M + K \log P)$, where $M$ is the number of resting orders consumed and $K$ is the number of price levels cleared.
+
+---
+
+## 12. Project Layout
+
+```text
+fix_orderbook/
+├── include/
+│   ├── Order.h             # Value types: Order, OrderModify, Trade, LevelInfo, AggregatedOrderbook
+│   ├── Orderbook.h         # Pure single-threaded matching engine declarations & invariants
+│   ├── OrderEvent.h        # Ingestion events (New, Cancel, Modify, Shutdown) and results
+│   ├── ThreadSafeQueue.h   # Multi-producer, single-consumer condition variable queue
+│   ├── OrderbookSnapshot.h # Immutable read-only snapshot with sequence number & timestamp
+│   ├── MatchingEngine.h    # Dedicated worker matching engine & lifecycle management
+│   ├── FixApp.h            # QuickFIX application adapter ingesting into MatchingEngine
+│   ├── ApiModels.h         # REST/WebSocket-facing request, response, status, and trade DTOs
+│   ├── ApiServer.h         # API adapter over MatchingEngine sync submission/read APIs
+│   ├── OrderStatusStore.h  # API-layer order lifecycle read model
+│   ├── TradeStore.h        # Bounded recent trade read model
+│   ├── OutboundBroadcastQueue.h # Bounded non-blocking outbound queue
+│   ├── WebSocketBroadcaster.h   # Async broadcaster abstraction with pluggable sinks
+│   ├── ApiJson.h           # Minimal JSON parser/serializer for API DTOs
+│   └── HttpApiServer.h     # Dependency-free HTTP/WebSocket network gateway
+├── src/
+│   ├── Orderbook.cpp       # Core matching algorithms (Market, FAK, Limit, Modify, Cancel)
+│   ├── MatchingEngine.cpp  # Worker loop, event dispatching, snapshot publishing, trade broadcasting
+│   ├── FixApp.cpp          # QuickFIX session handling and message callbacks
+│   ├── ApiModels.cpp       # API DTO helpers
+│   ├── ApiServer.cpp       # REST-style adapter methods and listener registration
+│   ├── OrderStatusStore.cpp# API order status read model
+│   ├── TradeStore.cpp      # Bounded recent trade storage
+│   ├── OutboundBroadcastQueue.cpp # Non-blocking outbound queue implementation
+│   ├── WebSocketBroadcaster.cpp   # Async outbound sink dispatch
+│   ├── ApiJson.cpp         # Minimal JSON parser/serializer implementation
+│   ├── HttpApiServer.cpp   # HTTP routes and WebSocket handshake/frame broadcast
+│   ├── api_main.cpp        # API server entry point
+│   └── main.cpp            # Application entry point demonstrating concurrent producers
+├── tests/
+│   ├── OrderbookTests.cpp  # Phase 1 test suite (35 automated tests)
+│   ├── ConcurrencyTests.cpp# Phase 2 concurrency test suite (15 automated tests)
+│   ├── FixAppTests.cpp     # Phase 3 FIX adapter test suite (21 automated tests)
+│   ├── ApiTests.cpp        # Phase 4/5 API/broadcast/equivalence/network test suite (29 automated tests)
+│   └── Benchmarks.cpp      # Phase 6 matching-engine benchmark suite
+├── frontend/               # React + TypeScript Phase 5 trading dashboard
+│   ├── src/api/            # REST client
+│   ├── src/hooks/          # WebSocket connection, reconnect, and sequence-gap handling
+│   ├── src/components/     # Dashboard panels
+│   ├── src/types/          # Shared API DTO types
+│   ├── Dockerfile          # Production frontend image
+│   └── nginx.conf          # Static serving and backend/WebSocket proxy rules
+├── Dockerfile              # Production backend image
+├── Dockerfile.tsan         # Linux ThreadSanitizer validation image
+├── docker-compose.yml      # Local production-style stack
+├── trading_confi.cfg       # QuickFIX FIX 4.4 session configuration
+├── Makefile                # Multi-target build script
+└── README.md               # Architecture documentation and spot-check instructions
+```
+
+---
+
+## 13. Building & Testing
+
+### Prerequisites
+- GCC / MinGW-w64 with C++17 support (`g++`)
+- Make / mingw32-make
+
+### Run All Backend Test Suites (100 Tests Total)
+```bash
+make test
+```
+This executes:
+1. `run_tests.exe` (Phase 1: 35 tests covering all core matching algorithms)
+2. `run_concurrency_tests.exe` (Phase 2: 15 tests covering multi-producer ingestion, thread safety, ordering, snapshots, and shutdown)
+3. `run_fix_tests.exe` (Phase 3: 21 tests covering FIX 4.4 adapter mapping, execution reports, cancel, cancel/replace, rejection, cumulative fill state, and both-side reporting)
+4. `run_api_tests.exe` (Phase 4/5: 29 tests covering REST-style writes, HTTP JSON routes, WebSocket handshake, typed WebSocket payloads, snapshot reads, trade/order broadcasts, non-blocking outbound queues, and FIX-vs-REST matching equivalence)
+
+Strict warning validation used during Phase 5:
+```bash
+make clean
+make test CXXFLAGS='-std=c++17 -Wall -Wextra -Wpedantic -O2 -Iinclude'
+make CXXFLAGS='-std=c++17 -Wall -Wextra -Wpedantic -O2 -Iinclude'
+```
+
+### Compile & Run Concurrent Engine
+```bash
+make
+./engine.exe
+```
+
+### Compile & Run API Server
+```bash
+make api-server
+./api_server.exe
+```
+
+Optional runtime configuration:
+
+```powershell
+$env:API_HOST='0.0.0.0'
+$env:API_PORT='18080'
+$env:CORS_ALLOWED_ORIGIN='http://127.0.0.1:5173'
+.\api_server.exe
+```
+
+### Build Frontend Dashboard
+
+```bash
+cd frontend
+npm install
+npm run build
+```
+
+Live Phase 5 demo flow:
+1. Start `api_server.exe` on port `18080`.
+2. Start the frontend with `npm run dev`.
+3. Submit `BUY LIMIT 100 x 10`.
+4. Submit `SELL LIMIT 100 x 4`.
+5. Verify a trade `4 @ 100`, BUY status `PARTIALLY_FILLED` with remaining `6`, SELL status `FILLED`, and updated orderbook/trade/execution panels.
+
+---
+
+## 14. Development Roadmap
+
+- [x] **Phase 1: Core Matching Engine Corrections & Refactoring**
+  - Fix Market Order semantics (aggressive sweep, never rests).
+  - Fix FAK semantics (immediate match, discard remainder, never rests).
+  - Single execution price determined by resting order.
+  - Priority-preserving order modification policy.
+  - Input validation & standard C++ exceptions.
+  - Clean separation of headers (`include/`) and source (`src/`).
+  - 35 automated unit tests.
+- [x] **Phase 2: Concurrent Order Ingestion & Serialized Matching**
+  - Single ownership of canonical `Orderbook` (no concurrent mutations).
+  - Thread-safe MPSC event queue with condition-variable wakeup (no busy-waiting).
+  - Dedicated worker thread processing events sequentially.
+  - Multi-producer support (FIX, REST, simulated gateways).
+  - Immutable read-only snapshots isolating slow consumers.
+  - Real-time trade event broadcasting pipeline.
+  - 15 automated concurrency tests (50 tests total).
+- [x] **Phase 3: FIX 4.4 Execution Reports & Protocol Unification**
+  - FIX 4.4 message headers for `NewOrderSingle`, `OrderCancelRequest`, `OrderCancelReplaceRequest`, and `ExecutionReport`.
+  - `ClOrdID` string mapping to generated internal order IDs.
+  - Unique `ExecID` generation independent from `ClOrdID`.
+  - Execution reports for New, Partial Fill, Fill, Cancel, Replace, and Reject.
+  - FIX-originated Limit, Market, and Fill-and-Kill orders routed through the MPSC queue.
+  - Cancel and Cancel/Replace flows preserve MatchingEngine single ownership.
+  - 21 automated Phase 3 adapter tests (71 tests total).
+- [x] **Phase 4: REST/WebSocket API Gateway**
+  - REST API adapter and socket-backed HTTP JSON gateway for submit, cancel, modify, order status, orderbook, and recent trades.
+  - All writes flow through validation -> `OrderEvent` -> MPSC queue -> matching worker.
+  - WebSocket outbound broadcasting is decoupled through bounded non-blocking queues and async network sinks.
+  - FIX and REST Limit, Market, and FAK flows are regression-tested for identical matching semantics.
+  - 29 automated Phase 4/5 backend adapter tests (100 backend tests total).
+- [x] **Phase 5: Real-Time Frontend Dashboard**
+  - React + TypeScript terminal with order entry, order book, trade tape, orders table, and execution panel.
+  - REST-only commands and WebSocket-only live event updates against the actual C++ API server.
+  - Centralized WebSocket reconnection and sequence-gap refresh handling.
+  - Production frontend build validated with `npm run build`.
+- [x] **Phase 6: Productionization, Docker, Reliability & Benchmarking**
+  - Environment-driven backend/frontend configuration.
+  - Signal-driven API server lifecycle and graceful matching-engine shutdown.
+  - Multi-stage backend and frontend Docker containerization.
+  - Local production-style Docker Compose stack.
+  - Matching-engine benchmark suite with throughput and latency percentiles.
+  - Linux ThreadSanitizer validation path for concurrency tests.
+- [ ] **Phase 7: Public Cloud Deployment & CI/CD**
+  - GitHub Actions build, regression, frontend, TSan, and Docker validation workflows added.
+  - GitHub Container Registry publishing workflow added.
+  - Public HTTPS/WSS deployment and final demo documentation remain next.
