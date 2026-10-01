@@ -1,32 +1,51 @@
-# React + TypeScript + Vite
+# Trading Engine 2.0 Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+React + TypeScript + Vite trading terminal for the C++ matching-engine backend.
 
-Currently, two official plugins are available:
+## Runtime model
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- REST is used for commands and initial state loading.
+- WebSocket is used for live `orderUpdate`, `orderbook`, and `trade` events.
+- The frontend never performs matching, FIFO priority, or execution-state inference; backend state is authoritative.
 
-## React Compiler
+## Configuration
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Create a local `.env` from `.env.example` when overriding defaults.
 
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```text
+VITE_API_BASE_URL=http://127.0.0.1:18080
+VITE_WS_URL=ws://127.0.0.1:18080/ws
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+Production Render values:
+
+```text
+VITE_API_BASE_URL=https://tradex-i7n2.onrender.com
+VITE_WS_URL=wss://tradex-i7n2.onrender.com/ws
+```
+
+## Development
+
+```bash
+npm ci
+npm run dev
+```
+
+## Validation
+
+```bash
+npm run build
+npm run lint
+```
+
+## Deployment
+
+Render Static Site configuration:
+
+```text
+Root Directory: frontend
+Build Command: npm ci && npm run build
+Publish Directory: dist
+```
+
+Live site: https://tradepro-ggba.onrender.com

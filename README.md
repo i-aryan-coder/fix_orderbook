@@ -1,6 +1,33 @@
-# C++ FIX Order Matching Engine (Phase 5: React Trading Dashboard)
+# Trading Engine 2.0 — Complete FIX/REST/WebSocket Matching System
 
-A deterministic, high-performance, in-memory continuous double auction order matching engine written in modern C++17, designed with clean low-level design (LLD) principles for financial exchanges and electronic trading systems.
+A deterministic, high-performance, in-memory continuous double auction order matching engine written in modern C++17, with FIX 4.4, REST, WebSocket, Docker, CI/CD, and a deployed React trading terminal.
+
+---
+
+## Project Status
+
+**Status:** Complete and publicly deployed.
+
+| Area | Status |
+| :--- | :--- |
+| Matching engine | Complete — deterministic single-owner orderbook with 100/100 backend regression tests. |
+| FIX 4.4 adapter | Complete — new, cancel, cancel/replace, execution reports, and rejection flows. |
+| REST/WebSocket API | Complete — order commands, order status, orderbook, trades, health, readiness, and live events. |
+| React dashboard | Complete — public trading terminal with REST commands and WSS live updates. |
+| Docker/runtime | Complete — backend and frontend containers plus production Compose template. |
+| CI/CD | Complete — GitHub Actions regression, frontend build/lint, ThreadSanitizer, Docker smoke test, and GHCR publish. |
+| Public deployment | Complete — Render Static Site frontend and Render Docker Web Service backend. |
+
+## Quick Links
+
+| Resource | URL |
+| :--- | :--- |
+| Live frontend | https://tradepro-ggba.onrender.com |
+| Live backend | https://tradex-i7n2.onrender.com |
+| Backend health | https://tradex-i7n2.onrender.com/health |
+| Backend readiness | https://tradex-i7n2.onrender.com/ready |
+
+Render free-tier services may sleep after inactivity. If the demo is cold, the first request can take a short time while the backend wakes; the dashboard reconnects automatically when the service is available.
 
 ---
 
@@ -370,15 +397,25 @@ Verified on Windows with Docker Desktop Linux containers:
 
 ## 7. Live Demo
 
-Frontend:
-https://tradepro-ggba.onrender.com
+| Service | URL | Purpose |
+| :--- | :--- | :--- |
+| Frontend | https://tradepro-ggba.onrender.com | Public React trading terminal. |
+| Backend | https://tradex-i7n2.onrender.com | Public C++ API/WebSocket service. |
+| Health | https://tradex-i7n2.onrender.com/health | Runtime health check. |
+| Readiness | https://tradex-i7n2.onrender.com/ready | Readiness check. |
 
-Backend:
-https://tradex-i7n2.onrender.com
+The public deployment runs the React trading terminal as a Render Static Site and the C++ matching-engine API as a Render Docker Web Service. Browser traffic uses HTTPS for REST and WSS for live orderbook, trade, and order-update events.
 
-The public deployment runs the React trading terminal as a Render Static Site and the C++ matching-engine API as a Render Docker Web Service. Browser traffic uses HTTPS for REST and WSS for live orderbook/trade/order-update events.
+### Verified public flow
 
-Render free-tier services may sleep after inactivity. If the demo is cold, the first request can take a short time while the backend wakes; the dashboard reconnects once the service is available.
+The deployed browser UI was validated with a real end-to-end trade flow:
+
+1. Submit `BUY LIMIT 100 x 10` from the public frontend.
+2. Submit `SELL LIMIT 100 x 4` from the public frontend.
+3. Verify trade `4 @ 100`.
+4. Verify BUY order status `PARTIALLY_FILLED` with remaining quantity `6`.
+5. Verify SELL order status `FILLED` with remaining quantity `0`.
+6. Verify orderbook bid level `100 x 6` and live WebSocket updates.
 
 ## 8. Deployment
 
@@ -390,14 +427,23 @@ Transport: HTTPS for REST and WSS for WebSocket live events.
 
 Production environment:
 
+Backend Render Web Service:
+
 ```text
 API_HOST=0.0.0.0
 CORS_ALLOWED_ORIGIN=https://tradepro-ggba.onrender.com
+```
+
+Frontend Render Static Site:
+
+```text
 VITE_API_BASE_URL=https://tradex-i7n2.onrender.com
 VITE_WS_URL=wss://tradex-i7n2.onrender.com/ws
 ```
 
-Render supplies `PORT` to the backend at runtime; the backend reads `PORT` before falling back to local `API_PORT`.
+Render supplies `PORT` to the backend at runtime; do not set it manually unless a hosting provider requires it. The backend reads `PORT` before falling back to local `API_PORT`.
+
+Local non-secret templates are provided in `.env.example` and `frontend/.env.example`. Copy them only for local development; never commit real provider tokens or credentials.
 
 ## 9. CI/CD
 
@@ -623,7 +669,7 @@ npm install
 npm run build
 ```
 
-Live Phase 5 demo flow:
+Local dashboard smoke flow:
 1. Start `api_server.exe` on port `18080`.
 2. Start the frontend with `npm run dev`.
 3. Submit `BUY LIMIT 100 x 10`.
@@ -676,7 +722,9 @@ Live Phase 5 demo flow:
   - Local production-style Docker Compose stack.
   - Matching-engine benchmark suite with throughput and latency percentiles.
   - Linux ThreadSanitizer validation path for concurrency tests.
-- [ ] **Phase 7: Public Cloud Deployment & CI/CD**
-  - GitHub Actions build, regression, frontend, TSan, and Docker validation workflows added.
-  - GitHub Container Registry publishing workflow added.
-  - Public HTTPS/WSS deployment and final demo documentation remain next.
+- [x] **Phase 7: Public Cloud Deployment & CI/CD**
+  - GitHub Actions build, regression, frontend, TSan, and Docker validation workflows added and verified.
+  - GitHub Container Registry publishing workflow added and verified.
+  - Render backend deployed as a Docker Web Service with HTTPS REST and WSS.
+  - Render frontend deployed as a Static Site using production API/WebSocket URLs.
+  - Public browser-to-engine trading flow validated end to end.
